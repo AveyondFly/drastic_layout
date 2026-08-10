@@ -453,12 +453,12 @@ std::filesystem::path LayoutDirectory(const std::string &layout_path)
     return parent.empty() ? std::filesystem::path(".") : parent;
 }
 
-std::filesystem::path ThemeBackgroundPath(const std::string &layout_path, const Layout &layout)
+std::filesystem::path ThemeBackgroundPath(const std::string &layout_path, const Layout &layout, int theme_id = 1)
 {
     if (layout.bg.empty()) {
         return std::filesystem::path();
     }
-    return LayoutDirectory(layout_path) / "1" / layout.bg;
+    return LayoutDirectory(layout_path) / std::to_string(theme_id) / layout.bg;
 }
 
 void NormalizeBackgroundName(Layout *layout)
@@ -473,43 +473,9 @@ void NormalizeBackgroundName(Layout *layout)
     }
 }
 
-std::string SanitizeFileStem(const std::string &name, int fallback_index)
-{
-    std::string out;
-    for (unsigned char c : name) {
-        if (std::isalnum(c)) {
-            out.push_back(static_cast<char>(std::tolower(c)));
-        } else if (c == '-' || c == '_' || c == ' ') {
-            if (out.empty() || out.back() != '_') {
-                out.push_back('_');
-            }
-        }
-    }
-    while (!out.empty() && out.back() == '_') {
-        out.pop_back();
-    }
-    if (out.empty()) {
-        out = "layout_" + std::to_string(fallback_index);
-    }
-    return out;
-}
 
-void EnsureDefaultBackgroundNames(Document *doc)
-{
-    std::map<std::string, int> used;
-    for (Layout &layout : doc->layouts) {
-        if (layout.bg.empty()) {
-            std::string stem = SanitizeFileStem(layout.name, layout.index);
-            int &count = used[stem];
-            if (count > 0) {
-                stem += "_" + std::to_string(count + 1);
-            }
-            ++count;
-            layout.bg = stem + ".png";
-        }
-        NormalizeBackgroundName(&layout);
-    }
-}
+
+
 
 void NormalizeIndices(Document *doc)
 {
@@ -606,6 +572,26 @@ bool LoadLayoutFile(const std::string &path, Document *doc, std::string *error)
     return true;
 }
 
+std::string GenerateCanonicalLayoutName(const Layout &layout, int doc_width, int doc_height);
+
+void EnsureDefaultBackgroundNames(Document *doc)
+{
+    std::map<std::string, int> used;
+    for (Layout &layout : doc->layouts) {
+        if (layout.bg.empty()) {
+            // 使用规范名称生成
+            std::string stem = GenerateCanonicalLayoutName(layout, doc->width, doc->height);
+            int &count = used[stem];
+            if (count > 0) {
+                stem += "_" + std::to_string(count + 1);
+            }
+            ++count;
+            layout.bg = stem + ".png";
+        }
+        NormalizeBackgroundName(&layout);
+    }
+}
+
 bool SaveLayoutFile(const std::string &path, Document doc, std::string *error)
 {
     NormalizeIndices(&doc);
@@ -687,7 +673,7 @@ Layout MakeDefaultLayout(const Document &doc, const char *name)
     return layout;
 }
 
-void ApplyTemplate(Document *doc, Layout *layout, int template_id)
+void ApplyTemplate(Document *doc, Layout *layout, int template_id, float scale = 1.0f)
 {
     const std::string name = layout->name;
     const std::string bg = layout->bg;
@@ -751,6 +737,68 @@ void ApplyTemplate(Document *doc, Layout *layout, int template_id)
         layout->type = 4;
         layout->screen[0] = FitAspect(0, 0, doc->width, doc->height);
         layout->screen[1] = {};
+        break;
+    case 5:
+        // 上屏倍数放大（基于NDS原始大小256x192）
+        layout->type = 0;
+        {
+            const int scaled_w = std::max(1, static_cast<int>(256 * scale));
+            const int scaled_h = scaled_w * kNdsAspectH / kNdsAspectW; // 保持4:3
+            if (scaled_w <= doc->width && scaled_h <= doc->height) {
+                layout->screen[0].w = scaled_w;
+                layout->screen[0].h = scaled_h;
+            } else {
+                // 如果超出画布，按画布适配
+                layout->screen[0] = FitAspect(0, 0, doc->width, doc->height / 2);
+            }
+            layout->screen[0].x = (doc->width - layout->screen[0].w) / 2;
+            layout->screen[0].y = 0;
+
+            const int remain_y = doc->height - layout->screen[0].h;
+            if (remain_y > 0) {
+                layout->screen[1].h = remain_y;
+                layout->screen[1].w = layout->screen[1].h * kNdsAspectW / kNdsAspectH;
+                if (layout->screen[1].w > doc->width) {
+                    layout->screen[1].w = doc->width;
+                    layout->screen[1].h = layout->screen[1].w * kNdsAspectH / kNdsAspectW;
+                }
+                layout->screen[1].x = (doc->width - layout->screen[1].w) / 2;
+                layout->screen[1].y = layout->screen[0].h;
+            } else {
+                layout->screen[1] = {};
+            }
+        }
+        break;
+    case 6:
+        // 左屏倍数放大（基于NDS原始大小256x192）
+        layout->type = 0;
+        {
+            const int scaled_h = std::max(1, static_cast<int>(192 * scale));
+            const int scaled_w = scaled_h * kNdsAspectW / kNdsAspectH; // 保持4:3
+            if (scaled_w <= doc->width && scaled_h <= doc->height) {
+                layout->screen[0].w = scaled_w;
+                layout->screen[0].h = scaled_h;
+            } else {
+                // 如果超出画布，按画布适配
+                layout->screen[0] = FitAspect(0, 0, doc->width / 2, doc->height);
+            }
+            layout->screen[0].x = 0;
+            layout->screen[0].y = (doc->height - layout->screen[0].h) / 2;
+
+            const int remain_x = doc->width - layout->screen[0].w;
+            if (remain_x > 0) {
+                layout->screen[1].w = remain_x;
+                layout->screen[1].h = layout->screen[1].w * kNdsAspectH / kNdsAspectW;
+                if (layout->screen[1].h > doc->height) {
+                    layout->screen[1].h = doc->height;
+                    layout->screen[1].w = layout->screen[1].h * kNdsAspectW / kNdsAspectH;
+                }
+                layout->screen[1].x = layout->screen[0].w;
+                layout->screen[1].y = (doc->height - layout->screen[1].h) / 2;
+            } else {
+                layout->screen[1] = {};
+            }
+        }
         break;
     default:
         break;
@@ -844,6 +892,329 @@ void KeepAspectFromWidth(RectI *rect)
     rect->h = rect->w * kNdsAspectH / kNdsAspectW;
 }
 
+std::string SanitizeFileStem(const std::string &name, int fallback_index)
+{
+    std::string out;
+    for (unsigned char c : name) {
+        if (std::isalnum(c)) {
+            out.push_back(static_cast<char>(std::tolower(c)));
+        } else if (c == '-' || c == '_' || c == ' ') {
+            if (out.empty() || out.back() != '_') {
+                out.push_back('_');
+            }
+        }
+    }
+    while (!out.empty() && out.back() == '_') {
+        out.pop_back();
+    }
+    if (out.empty()) {
+        out = "layout_" + std::to_string(fallback_index);
+    }
+    return out;
+}
+
+std::string GenerateCanonicalLayoutName(const Layout &layout, int doc_width, int doc_height)
+{
+    std::string base_name;
+    
+    // NDS单屏原始分辨率：256x192
+    constexpr float kNdsScreenW = 256.0f;
+    constexpr float kNdsScreenH = 192.0f;
+    
+    if (layout.type == 4) {
+        // 单屏布局
+        base_name = "single";
+        // 计算screen1的缩放比例（单屏只用screen1）
+        float scale = (layout.screen[1].w / kNdsScreenW + layout.screen[1].h / kNdsScreenH) / 2.0f;
+        scale = std::round(scale * 10.0f) / 10.0f;
+        char scale_str[32];
+        std::snprintf(scale_str, sizeof(scale_str), "_%.1fx", scale);
+        base_name += scale_str;
+    } else if (layout.type == 1) {
+        // 透明布局
+        base_name = "transparent";
+        // 计算screen0的缩放比例
+        float scale = (layout.screen[0].w / kNdsScreenW + layout.screen[0].h / kNdsScreenH) / 2.0f;
+        scale = std::round(scale * 10.0f) / 10.0f;
+        char scale_str[32];
+        std::snprintf(scale_str, sizeof(scale_str), "_%.1fx", scale);
+        base_name += scale_str;
+    } else {
+        // 双屏布局，判断方向
+        RectI screen0_display = DisplayRect(layout.screen[0], layout.rotate);
+        RectI screen1_display = DisplayRect(layout.screen[1], layout.rotate);
+        
+        // 计算两个屏幕的中心点
+        float center0_x = screen0_display.x + screen0_display.w / 2.0f;
+        float center0_y = screen0_display.y + screen0_display.h / 2.0f;
+        float center1_x = screen1_display.x + screen1_display.w / 2.0f;
+        float center1_y = screen1_display.y + screen1_display.h / 2.0f;
+        
+        // 判断是垂直还是水平布局
+        float dx = std::abs(center1_x - center0_x);
+        float dy = std::abs(center1_y - center0_y);
+        
+        // 旋转90/270度时，用户看到的方向和计算的方向相反
+        bool is_vertical;
+        if (layout.rotate == 90 || layout.rotate == 270) {
+            is_vertical = dx > dy;  // 旋转后，水平距离大说明是垂直布局
+        } else {
+            is_vertical = dy > dx;
+        }
+        
+        if (is_vertical) {
+            base_name = "vertical";
+        } else {
+            base_name = "horizontal";
+        }
+        
+        // 添加旋转后缀
+        if (layout.rotate == 90) {
+            base_name += "_rotate90";
+        } else if (layout.rotate == 180) {
+            base_name += "_rotate180";
+        } else if (layout.rotate == 270) {
+            base_name += "_rotate270";
+        }
+        
+        // 计算每个屏幕相对于NDS单屏(256x192)的缩放比例
+        float scale0 = (layout.screen[0].w / kNdsScreenW + layout.screen[0].h / kNdsScreenH) / 2.0f;
+        float scale1 = (layout.screen[1].w / kNdsScreenW + layout.screen[1].h / kNdsScreenH) / 2.0f;
+        scale0 = std::round(scale0 * 10.0f) / 10.0f;
+        scale1 = std::round(scale1 * 10.0f) / 10.0f;
+        
+        // 添加两个屏幕的倍率
+        char scale_str[64];
+        std::snprintf(scale_str, sizeof(scale_str), "_%.1fx_%.1fx", scale0, scale1);
+        base_name += scale_str;
+    }
+    
+    return base_name;
+}
+
+bool IsCanonicalLayoutName(const std::string &name)
+{
+    // 检查是否符合规范命名
+    static const std::vector<std::string> canonical_prefixes = {
+        "vertical", "horizontal", "single", "transparent", "high-resolution"
+    };
+    
+    for (const auto &prefix : canonical_prefixes) {
+        if (name.substr(0, prefix.length()) == prefix) {
+            // 检查后缀是否是有效的比例格式（如 _1.5x）
+            std::string suffix = name.substr(prefix.length());
+            if (suffix.empty()) {
+                return true; // 没有后缀，符合规范
+            }
+            if (suffix[0] == '_') {
+                // 检查是否是数字+倍数格式
+                size_t x_pos = suffix.find('x');
+                if (x_pos != std::string::npos) {
+                    std::string number_part = suffix.substr(1, x_pos - 1);
+                    try {
+                        std::stof(number_part);
+                        return true;
+                    } catch (...) {
+                        return false;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+int RenameNonCanonicalFiles(const std::string &layout_path, Document *doc, std::string *error)
+{
+    int renamed = 0;
+    std::filesystem::path base_dir = LayoutDirectory(layout_path);
+    std::filesystem::path bg_dir = base_dir / "1";
+    bool bg_dir_exists = std::filesystem::exists(bg_dir);
+    
+    for (auto &layout : doc->layouts) {
+        // 重命名布局的name字段为规范名称
+        std::string canonical_name = GenerateCanonicalLayoutName(layout, doc->width, doc->height);
+        if (layout.name != canonical_name) {
+            layout.name = canonical_name;
+            ++renamed;
+        }
+        
+        // 重命名bg文件
+        if (layout.bg.empty()) {
+            continue;
+        }
+        
+        if (!bg_dir_exists) {
+            continue;
+        }
+        
+        // 检查当前文件名是否符合规范
+        std::filesystem::path current_path = bg_dir / layout.bg;
+        if (!std::filesystem::exists(current_path)) {
+            continue; // 文件不存在，跳过
+        }
+        
+        std::string canonical_filename = canonical_name + ".png";
+        
+        // 如果文件名已经符合规范，跳过
+        if (layout.bg == canonical_filename) {
+            continue;
+        }
+        
+        // 检查规范文件名是否已存在
+        std::filesystem::path canonical_path = bg_dir / canonical_filename;
+        if (std::filesystem::exists(canonical_path)) {
+            // 规范文件名已存在，添加数字后缀
+            int counter = 1;
+            while (true) {
+                std::string numbered_name = canonical_name + "_" + std::to_string(counter) + ".png";
+                std::filesystem::path numbered_path = bg_dir / numbered_name;
+                if (!std::filesystem::exists(numbered_path)) {
+                    canonical_filename = numbered_name;
+                    canonical_path = numbered_path;
+                    break;
+                }
+                ++counter;
+            }
+        }
+        
+        // 重命名文件
+        std::error_code ec;
+        std::filesystem::rename(current_path, canonical_path, ec);
+        if (ec) {
+            *error = "Failed to rename " + layout.bg + " to " + canonical_filename + ": " + ec.message();
+            return -1;
+        }
+        
+        // 更新布局中的背景文件名
+        layout.bg = canonical_filename;
+        ++renamed;
+    }
+    
+    return renamed;
+}
+
+int RenameAllThemes(const std::string &layout_path, Document *doc, std::string *error)
+{
+    int total_renamed = 0;
+    std::filesystem::path base_dir = LayoutDirectory(layout_path);
+    
+    // 保存每个布局的原始bg名称和生成规范名称
+    struct LayoutRenameInfo {
+        std::string old_bg;
+        std::string canonical_name;
+        std::string canonical_filename;
+    };
+    std::vector<LayoutRenameInfo> rename_info;
+    
+    for (auto &layout : doc->layouts) {
+        LayoutRenameInfo info;
+        info.old_bg = layout.bg;
+        info.canonical_name = GenerateCanonicalLayoutName(layout, doc->width, doc->height);
+        info.canonical_filename = info.canonical_name + ".png";
+        
+        // 更新布局的name字段
+        if (layout.name != info.canonical_name) {
+            layout.name = info.canonical_name;
+            ++total_renamed;
+        }
+        
+        rename_info.push_back(info);
+    }
+    
+    // 遍历所有主题目录 (1-9)
+    for (int theme_id = 1; theme_id <= 9; ++theme_id) {
+        std::filesystem::path bg_dir = base_dir / std::to_string(theme_id);
+        if (!std::filesystem::exists(bg_dir)) {
+            continue; // 主题目录不存在，跳过
+        }
+        
+        for (size_t i = 0; i < doc->layouts.size(); ++i) {
+            auto &layout = doc->layouts[i];
+            auto &info = rename_info[i];
+            
+            if (info.old_bg.empty()) {
+                // 如果原始bg为空，检查是否需要从theme 1复制补全
+                if (theme_id > 1 && !layout.bg.empty()) {
+                    std::filesystem::path src_path = base_dir / "1" / layout.bg;
+                    std::filesystem::path dst_path = bg_dir / layout.bg;
+                    if (std::filesystem::exists(src_path) && !std::filesystem::exists(dst_path)) {
+                        std::error_code ec;
+                        std::filesystem::copy_file(src_path, dst_path, ec);
+                        if (!ec) {
+                            ++total_renamed;
+                        }
+                    }
+                }
+                continue;
+            }
+            
+            // 用原始bg名称查找文件
+            std::filesystem::path current_path = bg_dir / info.old_bg;
+            
+            // 如果文件不存在，尝试从theme 1复制补全
+            if (!std::filesystem::exists(current_path)) {
+                if (theme_id > 1) {
+                    std::filesystem::path src_path = base_dir / "1" / info.old_bg;
+                    if (std::filesystem::exists(src_path)) {
+                        std::error_code ec;
+                        std::filesystem::copy_file(src_path, current_path, ec);
+                        if (ec) {
+                            continue; // 复制失败，跳过
+                        }
+                    } else {
+                        continue; // 源文件也不存在，跳过
+                    }
+                } else {
+                    continue; // theme 1 不存在，跳过
+                }
+            }
+            
+            // 如果文件名已经符合规范，跳过重命名
+            if (info.old_bg == info.canonical_filename) {
+                continue;
+            }
+            
+            // 检查规范文件名是否已存在
+            std::filesystem::path canonical_path = bg_dir / info.canonical_filename;
+            std::string final_filename = info.canonical_filename;
+            if (std::filesystem::exists(canonical_path)) {
+                // 规范文件名已存在，添加数字后缀
+                int counter = 1;
+                while (true) {
+                    std::string numbered_name = info.canonical_name + "_" + std::to_string(counter) + ".png";
+                    std::filesystem::path numbered_path = bg_dir / numbered_name;
+                    if (!std::filesystem::exists(numbered_path)) {
+                        final_filename = numbered_name;
+                        canonical_path = numbered_path;
+                        break;
+                    }
+                    ++counter;
+                }
+            }
+            
+            // 重命名文件
+            std::error_code ec;
+            std::filesystem::rename(current_path, canonical_path, ec);
+            if (ec) {
+                *error = "Failed to rename " + info.old_bg + " in theme " + std::to_string(theme_id) + ": " + ec.message();
+                return -1;
+            }
+            
+            // 更新布局中的背景文件名（只在第一个主题时更新）
+            if (theme_id == 1) {
+                layout.bg = final_filename;
+            }
+            ++total_renamed;
+        }
+    }
+    
+    return total_renamed;
+}
+
+
+
 void SetLockedAspectFromDisplayWidth(RectI *rect, int rotate, int desired_display_w, int canvas_w, int canvas_h)
 {
     rect->x = std::max(0, std::min(rect->x, canvas_w - 1));
@@ -895,6 +1266,7 @@ struct AppState {
     Document doc;
     int current_layout = 0;
     int selected_screen = 0;
+    int current_theme = 1; // 当前主题ID (1-9)
     bool lock_aspect = true;
     bool allow_overlap = true;
     UiLanguage language = DetectUiLanguage();
@@ -905,6 +1277,8 @@ struct AppState {
     std::string bg_texture_path;
     int bg_texture_w = 0;
     int bg_texture_h = 0;
+    float top_scale = 2.0f;
+    float left_scale = 2.0f;
 };
 
 ID3D11Device *g_pd3d_device = nullptr;
@@ -1243,7 +1617,7 @@ bool LoadTextureFromFile(const std::filesystem::path &path, ID3D11ShaderResource
 
 void EnsureBackgroundTexture(AppState *state, const Layout &layout)
 {
-    const std::filesystem::path bg_path = ThemeBackgroundPath(state->file_path, layout);
+    const std::filesystem::path bg_path = ThemeBackgroundPath(state->file_path, layout, state->current_theme);
     const std::string path_string = bg_path.empty() ? std::string() : bg_path.u8string();
     if (path_string == state->bg_texture_path) {
         return;
@@ -1550,6 +1924,16 @@ void DrawLayoutList(AppState *state)
         doc.height = std::max(1, doc.height);
     }
 
+    // 主题切换
+    ImGui::Spacing();
+    ImGui::SeparatorText(Tr(state, "Theme", "主题"));
+    const char *themes[] = {"1", "2", "3", "4", "5", "6", "7", "8", "9"};
+    int theme_index = state->current_theme - 1;
+    if (ImGui::Combo(Tr(state, "Theme ID", "主题编号"), &theme_index, themes, IM_ARRAYSIZE(themes))) {
+        state->current_theme = theme_index + 1;
+        ReleaseBackgroundTexture(state);
+    }
+
     ImGui::Spacing();
     ImGui::Text(Tr(state, "Layouts (%d/%d)", "布局列表 (%d/%d)"), static_cast<int>(doc.layouts.size()), kMaxLayouts);
     ImGui::Separator();
@@ -1593,6 +1977,25 @@ void DrawLayoutList(AppState *state)
         NormalizeIndices(&doc);
     }
     ImGui::PopStyleColor(3);
+    ImGui::EndDisabled();
+
+    // 上移下移按钮
+    ImGui::BeginDisabled(state->current_layout <= 0);
+    if (ImGui::Button(Tr(state, "Move Up", "上移"), ImVec2(-FLT_MIN, 0))) {
+        int idx = state->current_layout;
+        std::swap(doc.layouts[idx], doc.layouts[idx - 1]);
+        NormalizeIndices(&doc);
+        state->current_layout = idx - 1;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::BeginDisabled(state->current_layout >= static_cast<int>(doc.layouts.size()) - 1);
+    if (ImGui::Button(Tr(state, "Move Down", "下移"), ImVec2(-FLT_MIN, 0))) {
+        int idx = state->current_layout;
+        std::swap(doc.layouts[idx], doc.layouts[idx + 1]);
+        NormalizeIndices(&doc);
+        state->current_layout = idx + 1;
+    }
     ImGui::EndDisabled();
 }
 
@@ -1656,6 +2059,11 @@ void DrawInspector(AppState *state)
 
     ImGui::Spacing();
     ImGui::SeparatorText(Tr(state, "Templates", "模板"));
+    // 根据画布大小计算最大倍率
+    float max_scale = std::min(static_cast<float>(doc.width) / 256.0f, static_cast<float>(doc.height) / 192.0f);
+    max_scale = std::max(1.0f, std::floor(max_scale * 10.0f) / 10.0f); // 向下取整到0.1
+    ImGui::SliderFloat(Tr(state, "Top Scale", "上屏倍数"), &state->top_scale, 1.0f, max_scale, "%.1fx");
+    ImGui::SliderFloat(Tr(state, "Left Scale", "左屏倍数"), &state->left_scale, 1.0f, max_scale, "%.1fx");
     if (ImGui::BeginTable("template_buttons", 2, ImGuiTableFlags_SizingStretchSame)) {
         ImGui::TableNextColumn();
         if (ImGui::Button(Tr(state, "Side by Side", "左右并排"), ImVec2(-FLT_MIN, 0))) {
@@ -1690,10 +2098,86 @@ void DrawInspector(AppState *state)
                 ResolveLayoutOverlap(&layout, doc.width, doc.height);
             }
         }
+        ImGui::TableNextColumn();
+        if (ImGui::Button(Tr(state, "Top Scaled", "上屏倍数放大"), ImVec2(-FLT_MIN, 0))) {
+            ApplyTemplate(&doc, &layout, 5, state->top_scale);
+            if (!state->allow_overlap) {
+                ResolveLayoutOverlap(&layout, doc.width, doc.height);
+            }
+        }
+        ImGui::TableNextColumn();
+        if (ImGui::Button(Tr(state, "Left Scaled", "左屏倍数放大"), ImVec2(-FLT_MIN, 0))) {
+            ApplyTemplate(&doc, &layout, 6, state->left_scale);
+            if (!state->allow_overlap) {
+                ResolveLayoutOverlap(&layout, doc.width, doc.height);
+            }
+        }
         ImGui::EndTable();
     }
 
+    ImGui::Spacing();
+    ImGui::SeparatorText(Tr(state, "Naming", "命名"));
+    
+    // 显示当前布局的规范名称
+    std::string canonical_name = GenerateCanonicalLayoutName(layout, doc.width, doc.height);
+    ImGui::Text("%s: %s", Tr(state, "Canonical name", "规范名称"), canonical_name.c_str());
+    ImGui::Text("%s: %s", Tr(state, "Current name", "当前名称"), layout.name.c_str());
+    
+    // 重命名当前布局的name
+    if (ImGui::Button(Tr(state, "Rename Current Layout Name", "重命名当前布局名称"), ImVec2(-FLT_MIN, 0))) {
+        std::string old_name = layout.name;
+        layout.name = canonical_name;
+        state->status = std::string(Tr(state, "Renamed '", "已重命名 '")) + old_name + 
+                        Tr(state, "' to '", "' 为 '") + canonical_name + "'";
+    }
+    
+    // 重命名当前主题的非规范文件
+    if (ImGui::Button(Tr(state, "Rename Current Theme", "重命名当前主题"), ImVec2(-FLT_MIN, 0))) {
+        if (state->file_path[0] == '\0') {
+            state->status = Tr(state, "Please load a layout.json first", "请先加载 layout.json 文件");
+        } else {
+            std::string error;
+            int result = RenameNonCanonicalFiles(state->file_path, &state->doc, &error);
+            if (result > 0) {
+                state->status = std::string(Tr(state, "Renamed ", "已重命名 ")) + std::to_string(result) + 
+                               Tr(state, " item(s)", " 个项目");
+                ReleaseBackgroundTexture(state);
+            } else if (result == 0) {
+                state->status = Tr(state, "All names already canonical", "所有名称已符合规范");
+            } else {
+                state->status = std::string(Tr(state, "Rename failed: ", "重命名失败：")) + error;
+            }
+        }
+    }
+    
+    // 重命名所有主题的非规范文件
+    if (ImGui::Button(Tr(state, "Rename All Themes", "重命名所有主题"), ImVec2(-FLT_MIN, 0))) {
+        if (state->file_path[0] == '\0') {
+            state->status = Tr(state, "Please load a layout.json first", "请先加载 layout.json 文件");
+        } else {
+            std::string error;
+            int result = RenameAllThemes(state->file_path, &state->doc, &error);
+            if (result > 0) {
+                state->status = std::string(Tr(state, "Renamed ", "已重命名 ")) + std::to_string(result) + 
+                               Tr(state, " item(s) across all themes", " 个项目（所有主题）");
+                ReleaseBackgroundTexture(state);
+            } else if (result == 0) {
+                state->status = Tr(state, "All names already canonical", "所有名称已符合规范");
+            } else {
+                state->status = std::string(Tr(state, "Rename failed: ", "重命名失败：")) + error;
+            }
+        }
+    }
+
     ImGui::Separator();
+    
+    // 交换屏幕按钮
+    if (ImGui::Button(Tr(state, "Swap Screens", "交换屏幕"), ImVec2(-FLT_MIN, 0))) {
+        std::swap(layout.screen[0], layout.screen[1]);
+        state->selected_screen = 1 - state->selected_screen;
+        state->status = Tr(state, "Screens swapped", "屏幕已交换");
+    }
+    
     for (int s = 0; s < 2; ++s) {
         ImGui::PushID(s);
         if (ImGui::Selectable(s == 0 ? "screen0" : "screen1", state->selected_screen == s)) {
